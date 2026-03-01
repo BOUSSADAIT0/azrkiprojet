@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Recensement BAT-EQ-127 — Upload PDF</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <div class="layout">
+    <header class="header">
+      <div class="header-inner">
+        <div class="logo">
+          <span class="logo-icon" aria-hidden="true">◇</span>
+          <h1>Recensement BAT-EQ-127</h1>
+        </div>
+        <p class="tagline">Extraction des données depuis vos PDF vers le tableau de recensement</p>
+      </div>
+    </header>
+
+    <main class="main">
+      <section class="card upload-card">
+        <h2>Téléverser des PDF</h2>
+        <p class="card-desc">Glissez-déposez vos devis ou documents PDF, ou cliquez pour parcourir. Plusieurs fichiers acceptés.</p>
+
+        <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="Zone de dépôt des fichiers PDF">
+          <input type="file" id="file-input" accept=".pdf,application/pdf" multiple hidden />
+          <div class="dropzone-content" id="dropzone-content">
+            <span class="dropzone-icon">📄</span>
+            <span class="dropzone-text">Glissez vos PDF ici ou <strong>cliquez pour choisir</strong></span>
+            <span class="dropzone-hint">PDF uniquement · max 50 Mo par fichier</span>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button type="button" class="btn btn-primary" id="btn-upload" disabled>
+            Envoyer les fichiers
+          </button>
+          <button type="button" class="btn btn-ghost" id="btn-clear">
+            Vider la sélection
+          </button>
+        </div>
+
+        <div class="upload-progress hidden" id="upload-progress">
+          <div class="progress-bar"><span class="progress-fill" id="progress-fill"></span></div>
+          <p class="progress-text" id="progress-text">Envoi en cours…</p>
+        </div>
+
+        <div class="message hidden" id="message"></div>
+      </section>
+
+      <section class="card list-card">
+        <h2>Fichiers déjà téléversés</h2>
+        <p class="card-desc">Liste des PDF présents sur le serveur (pour la prochaine étape : extraction et recensement).</p>
+        <div class="file-list" id="file-list">
+          <p class="empty-state" id="empty-state">Aucun fichier pour l’instant.</p>
+          <ul class="file-items" id="file-items"></ul>
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm" id="btn-refresh">Actualiser la liste</button>
+      </section>
+
+      <section class="card reading-card">
+        <h2>Lecture des enregistrements</h2>
+        <p class="card-desc">Consultez et téléchargez les fichiers enregistrés : PDF téléversés et fichiers Excel exportés.</p>
+        <div class="enregistrements-actions">
+          <button type="button" class="btn btn-primary btn-sm" id="btn-load-enregistrements">Actualiser la liste</button>
+        </div>
+        <div class="enregistrements-content" id="enregistrements-content">
+          <div class="enregistrements-section">
+            <h3>PDF téléversés</h3>
+            <p class="enregistrements-empty hidden" id="uploads-reading-empty">Aucun PDF enregistré.</p>
+            <ul class="enregistrements-list" id="enregistrements-uploads"></ul>
+          </div>
+          <div class="enregistrements-section">
+            <h3>Fichiers Excel exportés</h3>
+            <p class="enregistrements-empty hidden" id="exports-reading-empty">Aucun fichier Excel exporté.</p>
+            <ul class="enregistrements-list" id="enregistrements-exports"></ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="card split-card">
+        <h2>Découper par numéro de devis</h2>
+        <p class="card-desc">Un même PDF peut contenir plusieurs devis (1 à 3 pages chacun). Choisissez un fichier : l’OCR (Tesseract) lit le numéro en haut de chaque page et crée un PDF par devis.</p>
+        <div class="split-form">
+          <label for="split-select">PDF à découper</label>
+          <select id="split-select" class="split-select">
+            <option value="">— Choisir un fichier —</option>
+          </select>
+          <button type="button" class="btn btn-primary" id="btn-split" disabled>
+            Lancer la découpe
+          </button>
+        </div>
+        <div class="split-progress hidden" id="split-progress">
+          <p>Analyse des pages en cours (OCR)… Cela peut prendre une minute.</p>
+        </div>
+        <div class="split-result hidden" id="split-result">
+          <h3 id="split-result-title"></h3>
+          <ul class="split-downloads" id="split-downloads"></ul>
+        </div>
+        <div class="message hidden" id="split-message"></div>
+      </section>
+
+      <section class="card data-card">
+        <h2>Données extraites des devis</h2>
+        <p class="card-desc">Choisissez une source (PDF découpés), lancez l’extraction puis corrigez si besoin avant d’exporter vers Excel.</p>
+        <p class="card-hint">La liste affiche les dossiers créés après <strong>Découper par numéro de devis</strong>. Après un nouvel upload, lancez d'abord le découpage (étape ci-dessus) pour que la source apparaisse.</p>
+        <div class="extract-form">
+          <label for="extract-source">Source (dossier de devis découpés)</label>
+          <select id="extract-source" class="split-select">
+            <option value="">— Choisir une source —</option>
+          </select>
+          <button type="button" class="btn btn-primary" id="btn-extract" disabled>Extraire les données</button>
+        </div>
+        <div class="extract-progress hidden" id="extract-progress">Extraction en cours…</div>
+        <div class="data-table-wrap hidden" id="data-table-wrap">
+          <div class="table-actions">
+            <label class="export-path-label">Enregistrement Excel (chemin relatif au projet) :</label>
+            <input type="text" id="export-save-path" value="exports/recensement_bat_eq_127.xlsx" placeholder="exports/recensement_bat_eq_127.xlsx" class="export-path-input" />
+            <button type="button" class="btn btn-primary btn-sm" id="btn-export-excel" title="Enregistrer les données vers le fichier Excel">Export vers Excel</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="btn-download-excel" title="Télécharger une copie">Télécharger</button>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table" id="data-table">
+              <thead>
+                <tr id="data-table-head-row"></tr>
+              </thead>
+              <tbody id="data-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="message hidden" id="extract-message"></div>
+      </section>
+
+      <div class="modal hidden" id="edit-modal" role="dialog" aria-labelledby="edit-modal-title">
+        <div class="modal-backdrop" id="edit-modal-backdrop"></div>
+        <div class="modal-content modal-content-split">
+          <div class="modal-panel modal-panel-form">
+            <h3 id="edit-modal-title">Modifier la ligne</h3>
+            <form id="edit-form" class="edit-form">
+              <input type="hidden" id="edit-index" />
+              <div id="edit-form-fields" class="edit-form-fields"></div>
+              <div class="modal-actions">
+                <button type="submit" class="btn btn-primary">Enregistrer</button>
+                <button type="button" class="btn btn-ghost" id="edit-cancel">Annuler</button>
+              </div>
+            </form>
+          </div>
+          <div class="modal-panel modal-panel-pdf">
+            <div class="modal-pdf-header">PDF du devis</div>
+            <iframe id="edit-pdf-iframe" class="modal-pdf-iframe" title="PDF du devis"></iframe>
+            <div class="modal-pdf-placeholder hidden" id="edit-pdf-placeholder">Aucun PDF associé à cette ligne.</div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <p>Tableau de recensement des engagements BAT-EQ-127 · Données issues des PDF</p>
+    </footer>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

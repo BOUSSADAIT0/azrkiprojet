@@ -37,10 +37,13 @@ KWH_CUMAC_RE = re.compile(r"Kwh\s+Cumac\s*:\s*([\d\s,\.]+)", re.IGNORECASE)
 # Professionnel (ex: LECBA.TP SARL, SIRET 42174700700035)
 PROFESSIONNEL_SIRET_RE = re.compile(r"(?:représentée par|société)\s+[^,]+,?\s*SIRET\s*(\d[\d\s]*)", re.IGNORECASE)
 PROFESSIONNEL_RAISON_RE = re.compile(r"(?:notre\s+société|fourni[^p]*par\s+notre\s+société)\s+([A-Za-z0-9\.\s\-]+?)(?:\s*,|\s+représentée)", re.IGNORECASE)
-# Quantité / nombre de luminaires (ex: 351,00 U)
-QUANTITE_U_RE = re.compile(r"Quantit[eé]\s*:\s*([\d\s,\.]+)\s*U", re.IGNORECASE)
-# Nombre suivi de " U" (unités) — ex: 390,00 U  717,00 U  59,00 U  (colonne Quantité du tableau)
-NOMBRE_U_RE = re.compile(r"(\d+(?:[\s,\.]\d+)*)\s*U\b", re.IGNORECASE)
+# Quantité / nombre de luminaires (ex: 351,00 U ou 351,00)
+QUANTITE_U_RE = re.compile(r"Quantit[eé]\s*:\s*([\d\s,\.]+)\s*U?", re.IGNORECASE)
+# Nombre suivi de " U" (unités) — ex: 390,00 U  717,00 U  (colonne Quantité du tableau)
+# SANS espace à l'intérieur du nombre : évite de fusionner "1" (ligne 1,00) avec "45,00 U" → 145
+NOMBRE_U_RE = re.compile(r"(\d+(?:[,\.]\d+)?)\s*U\b", re.IGNORECASE)
+# Variante sans espace avant U (ex: 313,00U)
+NOMBRE_U_COMPACT_RE = re.compile(r"(\d+(?:[,\.]\d+)?)U\b", re.IGNORECASE)
 # Puissance luminaires (W)
 PUISSANCE_W_RE = re.compile(r"Puissance\s*(?:des\s+luminaires)?\s*:\s*([\d\s,\.]+)\s*W", re.IGNORECASE)
 # IRC (Indice de rendu des couleurs)
@@ -84,19 +87,43 @@ def _first_match(text: str, pattern: re.Pattern, group: int = 1) -> str:
     return _normalize(m.group(group)) if m else ""
 
 
-def _sum_quantite_u(text: str, pattern: re.Pattern) -> str:
-    """Somme des quantités en U, moins 1000 (ex: 1107 → 107)."""
+def _normalize_number(raw: str) -> str:
+    """Retourne une chaîne utilisable pour float : espaces supprimés, virgule → point."""
+    return (raw or "").strip().replace(" ", "").replace(",", ".")
+
+
+def _sum_quantite_u(text: str, *patterns: re.Pattern) -> tuple[str, list[str]]:
+    """
+    Somme des quantités en U (luminaires). Retourne (somme_affichée, liste des valeurs).
+    Ex: ("447", ["313", "134"]) pour 313,00 U + 134,00 U.
+    """
     total = 0.0
-    for m in pattern.finditer(text):
-        raw = (m.group(1) or "").strip().replace(" ", "").replace(",", ".")
-        try:
-            total += float(raw)
-        except ValueError:
-            continue
-    total = max(0.0, total - 1000)
+    values: list[str] = []
+    seen_spans: set[tuple[int, int]] = set()
+    for pattern in patterns:
+        for m in pattern.finditer(text):
+            span = m.span(1)
+            if span in seen_spans:
+                continue
+            seen_spans.add(span)
+            raw = _normalize_number(m.group(1) or "")
+            if not raw:
+                continue
+            try:
+                val = float(raw)
+                if val > 0:
+                    total += val
+                    # Affichage : entier si possible, sinon 2 décimales avec virgule
+                    if val == int(val):
+                        values.append(str(int(val)))
+                    else:
+                        values.append(f"{val:.2f}".replace(".", ","))
+            except ValueError:
+                continue
     if total == 0:
-        return ""
-    return str(int(total)) if total == int(total) else f"{total:.2f}".replace(".", ",")
+        return "", []
+    sum_str = str(int(total)) if total == int(total) else f"{total:.2f}".replace(".", ",")
+    return sum_str, values
 
 
 def _extract_text_from_pdf(pdf_path: Path, max_pages: int = 3) -> str:
@@ -229,9 +256,9 @@ def extract_devis_data(pdf_path: Path, use_ocr_fallback: bool = True) -> dict[st
         m = re.search(r"([A-Za-z0-9\.\-]+\s*SARL)", text)
         if m:
             raison_pro = _normalize(m.group(1))
-    # Nombre luminaires = somme des unités dans la colonne Quantité (ex: 390,00 U + 717,00 U)
+    # Nombre luminaires = somme des unités dans la colonne Quantité (ex: 313,00 U + 134,00 U)
     text_flat = re.sub(r"\s+", " ", text)
-    quantite_u = _sum_quantite_u(text_flat, NOMBRE_U_RE)
+    quantite_u, quantite_u_detail = _sum_quantite_u(text_flat, NOMBRE_U_RE, NOMBRE_U_COMPACT_RE)
     # Puissance (W) - première valeur
     puissance_w = _first_match(text, PUISSANCE_W_RE)
     # IRC (pour répartir colonnes 39/40 si besoin)
@@ -264,6 +291,7 @@ def extract_devis_data(pdf_path: Path, use_ocr_fallback: bool = True) -> dict[st
         "raison_sociale_professionnel": raison_pro,
         "siren_professionnel": siren_pro,
         "nombre_luminaires": quantite_u,
+        "nombre_luminaires_detail": quantite_u_detail,
         "puissance_totale_led_w": puissance_w,
         "irc": irc_value,
         "nom_site_beneficiaire": nom_client or adresse_travaux,

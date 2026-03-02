@@ -276,7 +276,7 @@ def _list_all_files_in_folder(folder: Path) -> list[str]:
 @app.post("/api/split-devis/retraiter")
 def retraiter_devis(body: RetraiterDevisRequest):
     """
-    Déplace la première page du PDF suivant vers la dernière position du PDF
+    Déplace la dernière page du PDF suivant vers le début du PDF
     sur lequel on a cliqué « Retraiter », et la supprime du PDF suivant.
     """
     if not body.source_stem or ".." in body.source_stem or "/" in body.source_stem or "\\" in body.source_stem:
@@ -336,10 +336,10 @@ def retraiter_devis(body: RetraiterDevisRequest):
                     log.warning("[RETRAITER] %s: unlink(tmp) fail: %s", label, e2)
 
     try:
-        # 1) Nouveau contenu du PDF courant (toutes les pages du curr + première page du next)
+        # 1) Nouveau contenu du PDF courant : dernière page du next en première position, puis toutes les pages du curr
         new_curr = fitz.open()
+        new_curr.insert_pdf(doc_next, from_page=n_next - 1, to_page=n_next - 1)
         new_curr.insert_pdf(doc_curr, from_page=0, to_page=len(doc_curr) - 1)
-        new_curr.insert_pdf(doc_next, from_page=0, to_page=0)
         doc_curr.close()
         doc_curr = None
         buf_curr = io.BytesIO()
@@ -361,14 +361,14 @@ def retraiter_devis(body: RetraiterDevisRequest):
             pass
         raise HTTPException(status_code=500, detail="Erreur écriture PDF courant : " + str(e))
     try:
-        # 2) PDF suivant : supprimer si 1 page, sinon écraser sans la première page
+        # 2) PDF suivant : supprimer si 1 page, sinon écraser sans la dernière page
         if n_next == 1:
             doc_next.close()
             next_path.unlink(missing_ok=True)
             log.info("[RETRAITER] NEXT: 1 page -> unlink(next) ok")
         else:
             new_next = fitz.open()
-            new_next.insert_pdf(doc_next, from_page=1, to_page=n_next - 1)
+            new_next.insert_pdf(doc_next, from_page=0, to_page=n_next - 2)
             doc_next.close()
             doc_next = None
             buf_next = io.BytesIO()

@@ -35,13 +35,15 @@
     splitDownloads.innerHTML = (devisList || []).map(function (d, i) {
       var label = d.devis_number != null ? d.devis_number : (d.filename || "").replace(/\.pdf$/i, "");
       var url = API_BASE + (d.download_url || stem + "/" + (d.filename || "")).split("/").map(encodeURIComponent).join("/");
-      var disabled = i === (devisList.length - 1) ? " disabled title='Aucun PDF suivant'" : " title='Prendre la première page du PDF suivant comme dernière page'";
+      var viewUrl = url + (url.indexOf("?") >= 0 ? "&" : "?") + "display=1";
+      var disabled = i === (devisList.length - 1) ? " disabled title='Aucun PDF suivant'" : " title='Prendre la dernière page du PDF suivant et la mettre en première page de ce devis'";
       var retraiterBtn = "<button type='button' class='btn btn-retraiter'" + disabled + " data-filename='" + escapeHtml(d.filename || "") + "'>Retraiter</button> ";
       var supprimerBtn = "<button type='button' class='btn btn-supprimer btn-ghost' title='Supprimer ce devis' data-filename='" + escapeHtml(d.filename || "") + "'>Supprimer</button> ";
       return (
         "<li>" + retraiterBtn + supprimerBtn +
-        "<a href='" + url + "' download>" + escapeHtml(label) + "</a> " +
-        "<span class='size'>(" + (d.page_count != null ? d.page_count : "?") + " page(s))</span></li>"
+        "<a href='" + viewUrl + "' target='_blank' rel='noopener' title='Afficher le PDF'>" + escapeHtml(label) + "</a> · " +
+        "<span class='size'>(" + (d.page_count != null ? d.page_count : "?") + " page(s))</span> · " +
+        "<a href='" + url + "' download title='Télécharger sur le disque'>Télécharger</a></li>"
       );
     }).join("");
   }
@@ -367,7 +369,7 @@
           return;
         }
         renderSplitDownloads(currentSplitSourceStem, data.devis || []);
-        showSplitMessage("Page déplacée : la première page du PDF suivant a été ajoutée à la fin de ce PDF.", "success");
+        showSplitMessage("Page déplacée : la dernière page du PDF suivant a été mise en première position de ce PDF.", "success");
         await loadSplitSources();
         if (extractSource && extractSource.value === currentSplitSourceStem && extractSourceStem === currentSplitSourceStem) {
           runExtraction(currentSplitSourceStem);
@@ -605,11 +607,16 @@
   });
 
   function renderDataTable() {
+    var nbLuminairesColIndex = TABLE_COLUMNS.findIndex(function (c) { return c.key === "nb_luminaires"; });
     dataTbody.innerHTML = extractedRecords
       .map(function (rec, i) {
-        var cells = TABLE_COLUMNS.map(function (col) {
+        var cells = TABLE_COLUMNS.map(function (col, colIdx) {
           var val = col.get(rec, i);
-          return "<td>" + escapeHtml(val != null ? String(val) : "") + "</td>";
+          var content = escapeHtml(val != null ? String(val) : "");
+          if (colIdx === nbLuminairesColIndex) {
+            return "<td class='cell-nb-luminaires' data-index='" + i + "' title='Cliquer pour voir le détail de la somme'>" + content + "</td>";
+          }
+          return "<td>" + content + "</td>";
         });
         cells.push("<td class='btn-cell'><button type='button' class='btn btn-ghost btn-sm btn-edit'>Modifier</button></td>");
         return "<tr data-index='" + i + "'>" + cells.join("") + "</tr>";
@@ -623,6 +630,110 @@
         openEditModal(i);
       });
     });
+    dataTbody.querySelectorAll(".cell-nb-luminaires").forEach(function (td) {
+      td.style.cursor = "pointer";
+      td.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var i = parseInt(td.getAttribute("data-index"), 10);
+        var rec = extractedRecords[i];
+        var detail = (rec && rec.nombre_luminaires_detail) ? rec.nombre_luminaires_detail.slice() : [];
+        var sum = (rec && rec.nombre_luminaires) ? String(rec.nombre_luminaires).trim() : "";
+        showNombreLuminairesDetail(detail, sum, td, i);
+      });
+    });
+  }
+
+  function showNombreLuminairesDetail(detail, sum, anchorEl, recordIndex) {
+    var existing = document.getElementById("popover-detail-somme");
+    if (existing) existing.remove();
+    var rec = extractedRecords[recordIndex];
+    var pop = document.createElement("div");
+    pop.id = "popover-detail-somme";
+    pop.className = "popover-detail-somme popover-detail-somme-editable";
+    var values = detail.length ? detail.slice() : (sum ? [sum] : []);
+    if (values.length === 0) values.push("");
+    var inputsHtml = values.map(function (v, idx) {
+      return "<div class='popover-detail-row'><label>Valeur " + (idx + 1) + "</label><input type='text' class='popover-detail-input' value='" + escapeHtml(String(v)) + "' placeholder='ex. 313' /></div>";
+    }).join("");
+    pop.innerHTML = "<div class='popover-detail-somme-inner'>" +
+      "<strong>Détail de la somme (Nombre luminaires)</strong>" +
+      "<div class='popover-detail-inputs'>" + inputsHtml + "</div>" +
+      "<button type='button' class='btn btn-ghost btn-sm popover-detail-add'>+ Ajouter une valeur</button>" +
+      "<p class='popover-detail-total'>Total : <span class='popover-detail-total-value'>" + escapeHtml(sum || "—") + "</span></p>" +
+      "<div class='popover-detail-actions'>" +
+      "<button type='button' class='btn btn-primary btn-sm popover-detail-save'>Enregistrer</button> " +
+      "<button type='button' class='btn btn-ghost btn-sm popover-detail-close'>Fermer</button>" +
+      "</div></div>";
+    document.body.appendChild(pop);
+    var rect = anchorEl.getBoundingClientRect();
+    pop.style.left = Math.min(rect.left, window.innerWidth - 340) + "px";
+    pop.style.top = (rect.bottom + 6) + "px";
+
+    function refreshTotalPreview() {
+      var inputs = pop.querySelectorAll(".popover-detail-input");
+      var total = 0;
+      var valid = [];
+      inputs.forEach(function (inp) {
+        var raw = (inp.value || "").trim().replace(",", ".");
+        if (raw === "") return;
+        var n = parseFloat(raw);
+        if (!isNaN(n) && n >= 0) {
+          total += n;
+          valid.push(n === Math.floor(n) ? String(Math.floor(n)) : n.toFixed(2).replace(".", ","));
+        }
+      });
+      var sumStr = total === Math.floor(total) ? String(Math.floor(total)) : total.toFixed(2).replace(".", ",");
+      var totalEl = pop.querySelector(".popover-detail-total-value");
+      if (totalEl) totalEl.textContent = valid.length ? sumStr : "—";
+    }
+
+    pop.querySelectorAll(".popover-detail-input").forEach(function (inp) {
+      inp.addEventListener("input", refreshTotalPreview);
+      inp.addEventListener("change", refreshTotalPreview);
+    });
+
+    pop.querySelector(".popover-detail-add").addEventListener("click", function () {
+      var container = pop.querySelector(".popover-detail-inputs");
+      var n = container.querySelectorAll(".popover-detail-row").length + 1;
+      var div = document.createElement("div");
+      div.className = "popover-detail-row";
+      div.innerHTML = "<label>Valeur " + n + "</label><input type='text' class='popover-detail-input' placeholder='ex. 134' />";
+      container.appendChild(div);
+      div.querySelector("input").addEventListener("input", refreshTotalPreview);
+      div.querySelector("input").addEventListener("change", refreshTotalPreview);
+    });
+
+    pop.querySelector(".popover-detail-save").addEventListener("click", function () {
+      var inputs = pop.querySelectorAll(".popover-detail-input");
+      var detailNew = [];
+      var total = 0;
+      inputs.forEach(function (inp) {
+        var raw = (inp.value || "").trim().replace(",", ".");
+        if (raw === "") return;
+        var n = parseFloat(raw);
+        if (!isNaN(n) && n >= 0) {
+          total += n;
+          detailNew.push(n === Math.floor(n) ? String(Math.floor(n)) : n.toFixed(2).replace(".", ","));
+        }
+      });
+      var sumStr = total === Math.floor(total) ? String(Math.floor(total)) : (total.toFixed(2).replace(".", ","));
+      if (rec) {
+        rec.nombre_luminaires = detailNew.length ? sumStr : "";
+        rec.nombre_luminaires_detail = detailNew;
+      }
+      pop.remove();
+      renderDataTable();
+      exportAndSave();
+    });
+
+    pop.querySelector(".popover-detail-close").addEventListener("click", function () { pop.remove(); });
+    function closePop(ev) {
+      if (pop.parentNode && !pop.contains(ev.target) && ev.target !== anchorEl) {
+        pop.remove();
+        document.removeEventListener("click", closePop);
+      }
+    }
+    document.addEventListener("click", closePop);
   }
 
   function openEditModal(index) {
@@ -729,6 +840,7 @@
           o[id] = r[id] != null ? String(r[id]) : "";
         });
         if (r._filename) o._filename = r._filename;
+        if (r.nombre_luminaires_detail && Array.isArray(r.nombre_luminaires_detail)) o.nombre_luminaires_detail = r.nombre_luminaires_detail;
         return o;
       });
       if (results.length && results.some(function (r) { return r.error; })) {

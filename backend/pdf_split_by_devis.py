@@ -20,10 +20,12 @@ except ImportError:
 
 try:
     import pytesseract
-    from PIL import Image
+    from PIL import Image, ImageEnhance, ImageOps
 except ImportError:
     pytesseract = None
     Image = None
+    ImageEnhance = None
+    ImageOps = None
 
 # Chemin vers tesseract.exe sous Windows si pas dans le PATH
 # Définir la variable d'environnement TESSERACT_CMD pour forcer un chemin.
@@ -43,15 +45,31 @@ def _init_tesseract_cmd() -> None:
                 return
 _init_tesseract_cmd()
 
-# Zone en haut de la page à scanner (environ 15 % de la hauteur)
-TOP_CROP_RATIO = 0.18
+# Zone en haut de la page (bannière type "DEVIS LESA-2026-0488" ou texte sous logo)
+TOP_CROP_RATIO = 0.30
+# Deuxième bande si rien en haut (logo peut décaler le numéro vers le bas)
+TOP_CROP_RATIO_SECOND = 0.20
 # DPI pour le rendu (plus élevé = meilleure OCR, plus lent)
 RENDER_DPI = 150
-# Regex : DEVIS suivi du numéro (ex. LESA-2026-0300, LESA-2026-0300 du, etc.)
-DEVIS_NUMBER_RE = re.compile(
-    r"DEVIS\s+([A-Za-z0-9]+-\d{4}-\d+)",
-    re.IGNORECASE,
-)
+RENDER_DPI_RETRY = 200
+
+# LESA-2026-0488 / LESA-2026-0489 (avec ou sans " du" après), bannière bleue ou sous logo
+DEVIS_PATTERNS = [
+    re.compile(r"DEVIS\s+([A-Za-z0-9]+[\s\-]*\d{4}[\s\-]*\d{3,})", re.IGNORECASE),
+    re.compile(r"DEVIS\s+([A-Za-z0-9]+-\d{4}-\d+)", re.IGNORECASE),
+    re.compile(r"N[°ºo]?\s*[Dd]evis\s*:?\s*([A-Za-z0-9]+[\s\-]*\d{4}[\s\-]*\d+)", re.IGNORECASE),
+    re.compile(r"[Dd]evis\s+N[°ºo]?\s*:?\s*([A-Za-z0-9]+[\s\-]*\d{4}[\s\-]*\d+)", re.IGNORECASE),
+    re.compile(r"R[ée]f(?:érence)?\s*:?\s*([A-Za-z0-9]+[\s\-]*\d{4}[\s\-]*\d+)", re.IGNORECASE),
+    re.compile(r"(?:^|\s)([A-Z]{2,}[A-Za-z0-9]*[\s\-]+\d{4}[\s\-]+\d{3,})\b", re.IGNORECASE),
+]
+
+
+def _normalize_devis_number(raw: str) -> str:
+    """Uniformise espaces/tirets pour que le même devis soit toujours groupé."""
+    s = raw.strip()
+    s = re.sub(r"\s+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s
 
 
 def _get_tesseract_lang() -> str:
@@ -88,25 +106,87 @@ def _check_tesseract() -> None:
         )
 
 
-def _extract_devis_number_from_image(pil_image) -> Optional[str]:
-    """Applique l'OCR sur l'image et retourne le numéro de devis trouvé."""
+def _preprocess_for_ocr(pil_image):
+    """Améliore le contraste et netteté pour faciliter l'OCR (scans pâles, flous)."""
+    if not Image or not ImageEnhance:
+        return pil_image
+    img = pil_image.convert("L")  # niveaux de gris
+    img = ImageEnhance.Contrast(img).enhance(1.4)
+    img = ImageEnhance.Sharpness(img).enhance(1.2)
+    return img
+
+
+def _extract_devis_number_from_text(text: str) -> Optional[str]:
+    """Cherche un numéro de devis dans le texte OCR avec tous les motifs."""
+    for pattern in DEVIS_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            raw = match.group(1).strip()
+            return _normalize_devis_number(raw)
+    return None
+
+
+def _extract_devis_number_from_image(pil_image, *, preprocess: bool = True) -> Optional[str]:
+    """Applique l'OCR sur l'image et retourne le numéro de devis trouvé.
+    Essaie : prétraitement, sans prétraitement, puis image inversée (texte clair sur bannière bleue).
+    """
     if not pytesseract or not Image:
         return None
-    text = pytesseract.image_to_string(pil_image, lang=_get_tesseract_lang())
-    match = DEVIS_NUMBER_RE.search(text)
-    if match:
-        return match.group(1).strip()
+    img = _preprocess_for_ocr(pil_image) if preprocess else pil_image
+    text = pytesseract.image_to_string(img, lang=_get_tesseract_lang())
+    num = _extract_devis_number_from_text(text)
+    if num:
+        return num
+    if preprocess:
+        text2 = pytesseract.image_to_string(pil_image, lang=_get_tesseract_lang())
+        num = _extract_devis_number_from_text(text2)
+        if num:
+            return num
+    # Bannière bleue / fond sombre : texte clair mal lu → inverser (fond blanc, texte noir)
+    if ImageOps:
+        try:
+            img_gray = pil_image.convert("L") if pil_image.mode != "L" else pil_image
+            img_inv = ImageOps.invert(img_gray)
+            text_inv = pytesseract.image_to_string(img_inv, lang=_get_tesseract_lang())
+            num = _extract_devis_number_from_text(text_inv)
+            if num:
+                return num
+        except Exception as e:
+            log_split.debug("[SPLIT] OCR image inversée: %s", e)
+    excerpt = text.strip()[:200].replace("\n", " ")
+    if excerpt:
+        log_split.debug("[SPLIT] OCR sans match, texte lu: %s", excerpt)
     return None
 
 
 def _get_devis_number_for_page(page, doc) -> Optional[str]:
-    """Pour une page donnée, rend le haut de la page, OCR, retourne le numéro de devis."""
+    """Pour une page donnée, rend le haut de la page, OCR, retourne le numéro de devis.
+    Essaie d'abord la bande du haut, puis une seconde bande si besoin, puis retry à plus haut DPI.
+    """
     img = _page_to_pil_image(page)
     w, h = img.size
-    # Crop : bande en haut (TOP_CROP_RATIO)
-    crop_height = max(1, int(h * TOP_CROP_RATIO))
-    top_crop = img.crop((0, 0, w, crop_height))
-    return _extract_devis_number_from_image(top_crop)
+    # Bande 1 : haut de page (TOP_CROP_RATIO)
+    crop1 = max(1, int(h * TOP_CROP_RATIO))
+    top_crop = img.crop((0, 0, w, crop1))
+    num = _extract_devis_number_from_image(top_crop)
+    if num:
+        return num
+    # Bande 2 : juste en dessous (certains PDF ont le titre un peu plus bas)
+    crop2 = max(1, int(h * TOP_CROP_RATIO_SECOND))
+    band2 = img.crop((0, crop1, w, min(crop1 + crop2, h)))
+    num = _extract_devis_number_from_image(band2)
+    if num:
+        return num
+    # Retry bande 1 à plus haute résolution (texte petit ou flou)
+    if h < 1200:  # page rendue assez petite
+        img_retry = _page_to_pil_image(page, dpi=RENDER_DPI_RETRY)
+        h2 = img_retry.size[1]
+        crop1_retry = max(1, int(h2 * TOP_CROP_RATIO))
+        top_retry = img_retry.crop((0, 0, img_retry.size[0], crop1_retry))
+        num = _extract_devis_number_from_image(top_retry)
+        if num:
+            return num
+    return None
 
 
 def split_pdf_by_devis(

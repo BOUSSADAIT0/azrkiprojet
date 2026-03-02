@@ -719,3 +719,85 @@ body {
 .footer p {
   margin: 0;
 }
+
+/* Cellule Nombre luminaires cliquable pour détail de la somme */
+.cell-nb-luminaires {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+.cell-nb-luminaires:hover {
+  background: var(--accent-dim);
+}
+
+/* Popover détail somme (valeurs qui composent le total) */
+.popover-detail-somme {
+  position: fixed;
+  z-index: 1000;
+  max-width: 320px;
+  padding: 0.75rem 1rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+}
+.popover-detail-somme-inner strong {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+.popover-detail-somme-inner .popover-detail-values {
+  margin: 0 0 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  word-break: break-all;
+}
+.popover-detail-close {
+  margin-top: 0.25rem;
+}
+
+/* Popover éditable (détail somme) */
+.popover-detail-somme-editable .popover-detail-inputs {
+  margin: 0.5rem 0;
+}
+.popover-detail-somme-editable .popover-detail-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+.popover-detail-somme-editable .popover-detail-row label {
+  flex: 0 0 70px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.popover-detail-somme-editable .popover-detail-input {
+  flex: 1;
+  padding: 0.35rem 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  min-width: 0;
+}
+.popover-detail-somme-editable .popover-detail-add {
+  margin-bottom: 0.5rem;
+}
+.popover-detail-somme-editable .popover-detail-total {
+  margin: 0.5rem 0;
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+}
+.popover-detail-somme-editable .popover-detail-total-value {
+  color: var(--accent);
+  font-weight: 600;
+}
+.popover-detail-somme-editable .popover-detail-actions {
+  margin-top: 0.75rem;
+  display: flex;
+  gap: 0.5rem;
+}

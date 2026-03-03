@@ -27,25 +27,41 @@
   const splitResultTitle = document.getElementById("split-result-title");
   const splitDownloads = document.getElementById("split-downloads");
   const splitMessage = document.getElementById("split-message");
+  const btnMergeSplit = document.getElementById("btn-merge-split");
   var currentSplitSourceStem = "";
+  var currentSplitDevisList = [];
+
+  function updateMergeButtonState() {
+    if (!btnMergeSplit) return;
+    var checked = splitDownloads && splitDownloads.querySelectorAll(".split-merge-cb:checked");
+    var n = checked ? checked.length : 0;
+    btnMergeSplit.disabled = n < 2;
+    btnMergeSplit.title = n < 2 ? "Sélectionnez au moins 2 PDF à fusionner" : "Fusionner les " + n + " PDF sélectionnés en un seul fichier (les originaux seront supprimés)";
+  }
 
   function renderSplitDownloads(sourceStem, devisList) {
     currentSplitSourceStem = sourceStem || currentSplitSourceStem;
+    currentSplitDevisList = devisList || [];
     var stem = currentSplitSourceStem;
-    splitDownloads.innerHTML = (devisList || []).map(function (d, i) {
+    splitDownloads.innerHTML = (currentSplitDevisList || []).map(function (d, i) {
       var label = d.devis_number != null ? d.devis_number : (d.filename || "").replace(/\.pdf$/i, "");
       var url = API_BASE + (d.download_url || stem + "/" + (d.filename || "")).split("/").map(encodeURIComponent).join("/");
       var viewUrl = url + (url.indexOf("?") >= 0 ? "&" : "?") + "display=1";
-      var disabled = i === (devisList.length - 1) ? " disabled title='Aucun PDF suivant'" : " title='Prendre la dernière page du PDF suivant et la mettre en première page de ce devis'";
+      var disabled = i === (currentSplitDevisList.length - 1) ? " disabled title='Aucun PDF suivant'" : " title='Prendre la dernière page du PDF suivant et la mettre en première page de ce devis'";
       var retraiterBtn = "<button type='button' class='btn btn-retraiter'" + disabled + " data-filename='" + escapeHtml(d.filename || "") + "'>Retraiter</button> ";
       var supprimerBtn = "<button type='button' class='btn btn-supprimer btn-ghost' title='Supprimer ce devis' data-filename='" + escapeHtml(d.filename || "") + "'>Supprimer</button> ";
+      var cb = "<input type='checkbox' class='split-merge-cb' data-filename='" + escapeHtml(d.filename || "") + "' title='Cocher pour fusionner ce PDF' /> ";
       return (
-        "<li>" + retraiterBtn + supprimerBtn +
+        "<li>" + cb + retraiterBtn + supprimerBtn +
         "<a href='" + viewUrl + "' target='_blank' rel='noopener' title='Afficher le PDF'>" + escapeHtml(label) + "</a> · " +
         "<span class='size'>(" + (d.page_count != null ? d.page_count : "?") + " page(s))</span> · " +
         "<a href='" + url + "' download title='Télécharger sur le disque'>Télécharger</a></li>"
       );
     }).join("");
+    updateMergeButtonState();
+    splitDownloads.querySelectorAll(".split-merge-cb").forEach(function (cb) {
+      cb.addEventListener("change", updateMergeButtonState);
+    });
   }
 
   let selectedFiles = [];
@@ -310,6 +326,43 @@
     splitMessage.textContent = text;
     splitMessage.className = "message " + (type === "error" ? "error" : "success");
     splitMessage.classList.remove("hidden");
+  }
+
+  if (btnMergeSplit) {
+    btnMergeSplit.addEventListener("click", async function () {
+      if (btnMergeSplit.disabled || !currentSplitSourceStem) return;
+      var checked = splitDownloads && splitDownloads.querySelectorAll(".split-merge-cb:checked");
+      if (!checked || checked.length < 2) return;
+      var filenames = Array.prototype.map.call(checked, function (cb) { return cb.getAttribute("data-filename"); }).filter(Boolean);
+      if (filenames.length < 2) return;
+      btnMergeSplit.disabled = true;
+      splitMessage.classList.add("hidden");
+      try {
+        var res = await fetch(API_BASE + "/api/split-devis/fusionner", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source_stem: currentSplitSourceStem, filenames: filenames }),
+        });
+        var data = await res.json().catch(function () { return {}; });
+        if (!res.ok) {
+          var detail = data.detail;
+          if (Array.isArray(detail)) detail = detail.map(function (x) { return x.msg || JSON.stringify(x); }).join(" ; ");
+          else if (typeof detail !== "string") detail = detail ? String(detail) : "Erreur fusion";
+          showSplitMessage(detail, "error");
+          updateMergeButtonState();
+          return;
+        }
+        renderSplitDownloads(currentSplitSourceStem, data.devis || []);
+        showSplitMessage(filenames.length + " PDF fusionné(s) en un seul fichier. Les originaux ont été supprimés.", "success");
+        await loadSplitSources();
+        if (extractSource && extractSource.value === currentSplitSourceStem && extractSourceStem === currentSplitSourceStem) {
+          runExtraction(currentSplitSourceStem);
+        }
+      } catch (err) {
+        showSplitMessage("Erreur : " + (err.message || "fusion"), "error");
+      }
+      updateMergeButtonState();
+    });
   }
 
   if (splitDownloads) {

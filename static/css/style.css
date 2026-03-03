@@ -415,6 +415,19 @@ body {
   cursor: not-allowed;
 }
 
+.split-merge-hint {
+  margin: 0 0 0.75rem;
+  font-size: 0.9rem;
+  color: var(--muted, #888);
+}
+.split-merge-actions {
+  margin-bottom: 0.75rem;
+}
+.split-downloads .split-merge-cb {
+  margin-right: 0.5rem;
+  flex-shrink: 0;
+}
+
 /* Données extraites + tableau */
 .extract-form {
   display: flex;

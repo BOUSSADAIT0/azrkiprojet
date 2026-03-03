@@ -248,6 +248,84 @@ class SupprimerDevisRequest(BaseModel):
     filename: str
 
 
+class FusionnerDevisRequest(BaseModel):
+    source_stem: str
+    filenames: list[str]
+
+
+def _merge_pdfs(folder: Path, filenames: list[str], out_name: str) -> Path:
+    """Fusionne les PDF listés (dans l'ordre) en un seul fichier out_name dans folder. Retourne le path du fichier créé."""
+    try:
+        import fitz
+    except ImportError:
+        raise HTTPException(status_code=500, detail="PyMuPDF (fitz) requis pour la fusion de PDF")
+    merged = fitz.open()
+    try:
+        for name in filenames:
+            path = folder / name
+            if not path.is_file():
+                raise HTTPException(status_code=404, detail=f"Fichier introuvable : {name}")
+            doc = fitz.open(path)
+            merged.insert_pdf(doc)
+            doc.close()
+        out_path = folder / out_name
+        merged.save(str(out_path))
+        return out_path
+    finally:
+        merged.close()
+
+
+@app.post("/api/split-devis/fusionner")
+def fusionner_devis(body: FusionnerDevisRequest):
+    """
+    Fusionne les PDF sélectionnés (dans l'ordre) en un seul nouveau PDF,
+    supprime les PDF d'origine, et retourne la liste mise à jour des devis.
+    """
+    if not body.source_stem or ".." in body.source_stem or "/" in body.source_stem or "\\" in body.source_stem:
+        raise HTTPException(status_code=400, detail="Source invalide")
+    if not body.filenames or len(body.filenames) < 2:
+        raise HTTPException(status_code=400, detail="Sélectionnez au moins 2 PDF à fusionner")
+    for f in body.filenames:
+        if not f or ".." in f or "/" in f or "\\" in f:
+            raise HTTPException(status_code=400, detail="Nom de fichier invalide")
+    folder = SPLITS_DIR / body.source_stem
+    if not folder.is_dir():
+        raise HTTPException(status_code=404, detail="Dossier source introuvable")
+    # Nom du fichier fusionné (éviter d'écraser un existant)
+    base = "fusion"
+    suffix = ".pdf"
+    out_name = base + suffix
+    n = 0
+    while (folder / out_name).is_file():
+        n += 1
+        out_name = f"{base}_{n}{suffix}"
+    try:
+        _merge_pdfs(folder, body.filenames, out_name)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Erreur fusion PDF : " + str(e))
+    for name in body.filenames:
+        path = folder / name
+        if path.is_file():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    base_url = f"/api/splits/{body.source_stem}"
+    devis = []
+    for name in _list_pdf_in_folder(folder):
+        page_count = _pdf_page_count(folder / name)
+        devis_number = name.replace(".pdf", "").replace(".PDF", "") if name.lower().endswith(".pdf") else name
+        devis.append({
+            "filename": name,
+            "devis_number": devis_number,
+            "page_count": page_count,
+            "download_url": f"{base_url}/{name}",
+        })
+    return {"devis": devis}
+
+
 def _pdf_page_count(pdf_path: Path) -> int:
     """Retourne le nombre de pages d'un PDF (PyMuPDF)."""
     try:
@@ -477,9 +555,10 @@ def extract_devis(body: ExtractDevisRequest):
     results = []
     for pdf_path in pdf_files:
         try:
-            data = extract_devis_data(pdf_path)
-            data["_filename"] = pdf_path.name
-            results.append(data)
+            rows = extract_devis_data(pdf_path)
+            for data in rows:
+                data["_filename"] = pdf_path.name
+                results.append(data)
         except Exception as e:
             results.append({"_filename": pdf_path.name, "num_devis": "", "error": str(e)})
     return {"results": results}

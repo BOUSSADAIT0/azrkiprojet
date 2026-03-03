@@ -55,6 +55,26 @@ DATE_RAI_RE = re.compile(
 )
 # Code fiche technique N°BAT-EQ-127 (phrase ministère Transition énergétique)
 FICHE_TECHNIQUE_RE = re.compile(r"fiche\s+technique\s+N[°ºo]?\s*([A-Z0-9\-]+)", re.IGNORECASE)
+# Marqueur fiable de chaque bloc d'adresse de travaux dans le tableau (toutes pages)
+BATIMENT_SECTEUR_MARKER_RE = re.compile(
+    r"B[aâ]timent\s+tertiaire\s*/\s*Secteur\s+d'activit[eé]\s*:",
+    re.IGNORECASE,
+)
+# Lignes à ignorer quand on reconstruit l'adresse (en-têtes répétés, pied de page, résidus tableau TVA)
+HEADER_NOISE_RE = re.compile(
+    r"Mail\s*:|T[eé]l\.?\s*:\s*\d|DEVIS\s+[A-Z0-9\-]+|LECBA\.TP|SIRET\s*:|N°TVA|R\.C\.S\.|DÉCENNALE|"
+    r"Détail\s+Quantité|P\.U\s+HT|Total\s+HT|\d{2}/\d{2}\s*$|@|domecologie|\.fr\s|\.com\s|"
+    r"^\s*0\s*%\s*$|0\s*%\s*0\s*%|\d+[,.]?\d*\s*€\s*0\s*%|^\s*[\d\s,\.€%]+\s*$",
+    re.IGNORECASE,
+)
+# Une ligne ressemble à une adresse (rue / lieu) si elle contient un de ces mots
+ADDRESS_LINE_RE = re.compile(
+    r"\b(Rue|Avenue|Allee|Allée|Boulevard|Route|Place|Cours|Chemin|Impasse|Quai|Square|"
+    r"École|Mairie|Gymnase|Centre\s+culturel|La\s+Mairie)\b|"
+    r"\d{1,4}\s+(Rue|Avenue|Allee|Route|Boulevard)|^\d+\s|"
+    r"all[eé]e\s+des|Saint\s+[A-Za-z]|Colonel\s|Rivierez|Chapelain|Cupidon|Prosperite|fraternit[eé]",
+    re.IGNORECASE,
+)
 
 
 def _normalize(s: Optional[str]) -> str:
@@ -126,6 +146,137 @@ def _sum_quantite_u(text: str, *patterns: re.Pattern) -> tuple[str, list[str]]:
     return sum_str, values
 
 
+def _find_multiple_address_blocks(text: str) -> list[dict[str, Any]]:
+    """
+    Détecte les blocs "adresse des travaux" en s'appuyant sur le marqueur
+    "Bâtiment tertiaire / Secteur d'activité :". Fenêtre très large pour ne
+    manquer aucune adresse (en-têtes répétés entre nom du lieu et CP+ville).
+    """
+    blocks: list[dict[str, Any]] = []
+    for m in BATIMENT_SECTEUR_MARKER_RE.finditer(text):
+        P = m.start()
+        # Chercher le CP+ville dans tout le texte avant ce marqueur (max 12 000 caractères)
+        search_start = max(0, P - 12000)
+        chunk = text[search_start:P]
+        cp_match = None
+        for cm in CP_VILLE_RE.finditer(chunk):
+            cp_match = cm
+        if not cp_match:
+            continue
+        Q = search_start + cp_match.start()
+        cp = cp_match.group(1).strip().replace(" ", "")
+        ville = _normalize(cp_match.group(2))
+        # Fenêtre large avant le CP pour récupérer nom du lieu + rue
+        before_start = max(0, Q - 2000)
+        before = text[before_start:Q]
+        raw_lines = [ln.strip() for ln in before.split("\n") if ln.strip()]
+        address_lines = [
+            ln for ln in raw_lines
+            if not HEADER_NOISE_RE.search(ln) and len(ln) > 2
+        ]
+        good_lines = [ln for ln in address_lines if ADDRESS_LINE_RE.search(ln)]
+        if not good_lines:
+            good_lines = address_lines
+        if not good_lines:
+            addr_line = _normalize(cp + " " + ville)
+        elif len(good_lines) >= 2:
+            addr_line = _normalize(good_lines[-2] + " " + good_lines[-1] + " " + cp + " " + ville)
+        else:
+            addr_line = _normalize(good_lines[-1] + " " + cp + " " + ville)
+        # Enlever en tête uniquement les résidus TVA/tableau (0 %, 0,00 € 0 %, etc.)
+        addr_line = re.sub(r"^(\s*0\s*%\s*)+", "", addr_line)
+        addr_line = re.sub(r"^[\d,\.]+\s*€\s*0\s*%\s*", "", addr_line)
+        addr_line = _normalize(addr_line)
+        if not addr_line:
+            addr_line = _normalize(cp + " " + ville)
+        # Rejeter uniquement si l'adresse est clairement un email / en-tête
+        if "@" in addr_line and ("Mail" in addr_line or "gmail" in addr_line or "domecologie" in addr_line.lower()):
+            continue
+        if addr_line.strip().lower().startswith("mail ") or "domecologie@gmail" in addr_line.lower():
+            continue
+        # Début du bloc pour le segment des quantités
+        last_nl = before.rfind("\n")
+        prev_nl = before.rfind("\n", 0, last_nl) if last_nl >= 0 else -1
+        name_nl = before.rfind("\n", 0, prev_nl) if prev_nl >= 0 else -1
+        block_start_in_chunk = (name_nl + 1) if name_nl >= 0 else (prev_nl + 1 if prev_nl >= 0 else 0)
+        block_start = before_start + block_start_in_chunk
+        blocks.append({
+            "adresse": addr_line,
+            "code_postal": cp,
+            "ville": ville,
+            "start": block_start,
+            "end": len(text),
+        })
+    for i in range(len(blocks) - 1):
+        blocks[i]["end"] = blocks[i + 1]["start"]
+    return blocks
+
+
+def _build_one_row(
+    *,
+    num_devis: str,
+    num_client: str,
+    nom_client: str,
+    siret: str,
+    adresse_client: str,
+    cp: str,
+    ville: str,
+    tel: Optional[str],
+    mail: str,
+    represente_par: str,
+    nom_beneficiaire: str,
+    prenom_beneficiaire: str,
+    secteur: str,
+    adresse_travaux: str,
+    cp_travaux: str,
+    ville_travaux: str,
+    date_rai: str,
+    code_fiche: str,
+    prime_cee: str,
+    total_ht: str,
+    total_ttc: str,
+    kwh_cumac: str,
+    raison_pro: str,
+    siren_pro: str,
+    quantite_u: str,
+    quantite_u_detail: list[str],
+    puissance_w: str,
+    irc_value: str,
+) -> dict[str, Any]:
+    """Construit un dict une ligne (une adresse de travaux)."""
+    return {
+        "num_devis": num_devis,
+        "num_client": num_client,
+        "nom_client": nom_client,
+        "siret": siret,
+        "adresse_client": adresse_client,
+        "code_postal": cp,
+        "ville": ville,
+        "tel": tel,
+        "mail": mail,
+        "represente_par": represente_par,
+        "nom_beneficiaire": nom_beneficiaire,
+        "prenom_beneficiaire": prenom_beneficiaire,
+        "secteur_activite": secteur,
+        "adresse_des_travaux": adresse_travaux,
+        "code_postal_travaux": cp_travaux,
+        "ville_travaux": ville_travaux,
+        "date_rai": date_rai,
+        "code_fiche": code_fiche,
+        "prime_cee": prime_cee,
+        "total_ht": total_ht,
+        "total_ttc": total_ttc,
+        "kwh_cumac": kwh_cumac,
+        "raison_sociale_professionnel": raison_pro,
+        "siren_professionnel": siren_pro,
+        "nombre_luminaires": quantite_u,
+        "nombre_luminaires_detail": quantite_u_detail,
+        "puissance_totale_led_w": puissance_w,
+        "irc": irc_value,
+        "nom_site_beneficiaire": nom_client or adresse_travaux,
+    }
+
+
 def _extract_text_from_pdf(pdf_path: Path, max_pages: int = 3) -> str:
     """Extrait le texte des premières pages via PyMuPDF (texte natif)."""
     if not fitz:
@@ -160,13 +311,13 @@ def _extract_with_ocr(pdf_path: Path, max_pages: int = 2) -> str:
     return "\n".join(texts)
 
 
-def extract_devis_data(pdf_path: Path, use_ocr_fallback: bool = True) -> dict[str, Any]:
+def extract_devis_data(pdf_path: Path, use_ocr_fallback: bool = True) -> list[dict[str, Any]]:
     """
     Extrait les champs d'un PDF devis (une fois découpé).
-    Retourne un dictionnaire avec les clés attendues par l'UI et l'Excel.
+    Retourne une liste de dictionnaires : un par adresse de travaux (même numéro de devis
+    si plusieurs lieux). Chaque dict a les clés attendues par l'UI et l'Excel.
     """
-    # Extraire plus de pages pour inclure le tableau (Quantité, 390,00 U, etc.)
-    text = _extract_text_from_pdf(pdf_path, max_pages=10)
+    text = _extract_text_from_pdf(pdf_path, max_pages=60)
     if use_ocr_fallback and len(text.strip()) < 100:
         text = _extract_with_ocr(pdf_path)
     text = text or ""
@@ -174,31 +325,26 @@ def extract_devis_data(pdf_path: Path, use_ocr_fallback: bool = True) -> dict[st
     num_devis = _first_match(text, DEVIS_NUMBER_RE)
     num_client = _first_match(text, NUMERO_CLIENT_RE)
     siret_raw = _first_match(text, SIRET_RE)
-    siret = re.sub(r"\s", "", siret_raw)[:14]  # 9 ou 14 chiffres
+    siret = re.sub(r"\s", "", siret_raw)[:14]
     tel_raw = _first_match(text, TEL_RE)
     tel = "".join(c for c in (tel_raw or "") if c.isdigit()) or None
     mail = _first_match(text, MAIL_RE)
     represente_par = _first_match(text, REPRESENTE_PAR_RE)
     nom_beneficiaire, prenom_beneficiaire = _split_nom_prenom(represente_par)
     secteur = _first_match(text, BATIMENT_TERTIAIRE_RE) or _first_match(text, SECTEUR_RE)
-    # ADRESSE DES TRAVAUX : uniquement les 2 premières lignes (ex. MG ALUMINIUM + 24 RUE DES MORPHOS)
-    adresse_travaux = ""
-    m_adr = ADRESSE_TRAVAUX_RE.search(text)
-    if m_adr:
-        l1, l2 = m_adr.group(1).strip(), (m_adr.group(2) or "").strip()
-        adresse_travaux = _normalize(l1 + " " + l2) if l2 else _normalize(l1)
     date_rai = _first_match(text, DATE_RAI_RE)
     code_fiche = _first_match(text, FICHE_TECHNIQUE_RE) or "BAT-EQ-127"
-    cp_travaux, ville_travaux = "", ""
-    if m_adr:
-        block_start = m_adr.end()
-        block = text[block_start : block_start + 400]
-        m_trav = CP_VILLE_RE.search(block)
-        if m_trav:
-            cp_travaux = m_trav.group(1).strip().replace(" ", "")
-            ville_travaux = _normalize(m_trav.group(2))
+    prime_cee_glob = _first_match(text, PRIME_CEE_RE)
+    total_ht = _first_match(text, TOTAL_HT_RE)
+    total_ttc = _first_match(text, TOTAL_TTC_RE)
+    kwh_cumac_glob = _first_match(text, KWH_CUMAC_RE)
+    siren_pro = re.sub(r"\s", "", _first_match(text, PROFESSIONNEL_SIRET_RE))[:14]
+    raison_pro = _normalize(_first_match(text, PROFESSIONNEL_RAISON_RE))
+    if not raison_pro and "SARL" in text:
+        m = re.search(r"([A-Za-z0-9\.\-]+\s*SARL)", text)
+        if m:
+            raison_pro = _normalize(m.group(1))
 
-    # Adresse client : souvent après Siret, jusqu'à Tél ou une ligne vide
     adresse_client = ""
     cp = ""
     ville = ""
@@ -206,11 +352,9 @@ def extract_devis_data(pdf_path: Path, use_ocr_fallback: bool = True) -> dict[st
     if cp_ville_m:
         cp = cp_ville_m.group(1).strip()
         ville = _normalize(cp_ville_m.group(2))
-    # Chercher un bloc d'adresse (lignes après Siret)
     lines = text.split("\n")
     for i, line in enumerate(lines):
         if re.match(r"Siret\s*:", line, re.I):
-            # prendre les lignes suivantes jusqu'à Tél/Mail/Représenté
             j = i + 1
             while j < len(lines):
                 l = lines[j].strip()
@@ -227,7 +371,6 @@ def extract_devis_data(pdf_path: Path, use_ocr_fallback: bool = True) -> dict[st
                     ville = _normalize(m.group(2))
             break
 
-    # Nom client : souvent à droite du DEVIS (même ligne ou bloc en haut à droite)
     nom_client = ""
     for line in lines:
         line = line.strip()
@@ -245,54 +388,88 @@ def extract_devis_data(pdf_path: Path, use_ocr_fallback: bool = True) -> dict[st
                     nom_client = _normalize(t)
                     break
 
-    prime_cee = _first_match(text, PRIME_CEE_RE)
-    total_ht = _first_match(text, TOTAL_HT_RE)
-    total_ttc = _first_match(text, TOTAL_TTC_RE)
-    kwh_cumac = _first_match(text, KWH_CUMAC_RE)
-    # Professionnel (société qui pose les luminaires)
-    siren_pro = re.sub(r"\s", "", _first_match(text, PROFESSIONNEL_SIRET_RE))[:14]
-    raison_pro = _normalize(_first_match(text, PROFESSIONNEL_RAISON_RE))
-    if not raison_pro and "SARL" in text:
-        m = re.search(r"([A-Za-z0-9\.\-]+\s*SARL)", text)
-        if m:
-            raison_pro = _normalize(m.group(1))
-    # Nombre luminaires = somme des unités dans la colonne Quantité (ex: 313,00 U + 134,00 U)
-    text_flat = re.sub(r"\s+", " ", text)
-    quantite_u, quantite_u_detail = _sum_quantite_u(text_flat, NOMBRE_U_RE, NOMBRE_U_COMPACT_RE)
-    # Puissance (W) - première valeur
+    adresse_client_val = adresse_client or f"{cp} {ville}".strip()
+
+    # Cas 1 : en-tête "ADRESSE DES TRAVAUX" présent → une seule adresse
+    m_adr = ADRESSE_TRAVAUX_RE.search(text)
+    if m_adr:
+        l1, l2 = m_adr.group(1).strip(), (m_adr.group(2) or "").strip()
+        adresse_travaux = _normalize(l1 + " " + l2) if l2 else _normalize(l1)
+        cp_travaux, ville_travaux = "", ""
+        block_start = m_adr.end()
+        block = text[block_start : block_start + 400]
+        m_trav = CP_VILLE_RE.search(block)
+        if m_trav:
+            cp_travaux = m_trav.group(1).strip().replace(" ", "")
+            ville_travaux = _normalize(m_trav.group(2))
+        text_flat = re.sub(r"\s+", " ", text)
+        quantite_u, quantite_u_detail = _sum_quantite_u(text_flat, NOMBRE_U_RE, NOMBRE_U_COMPACT_RE)
+        puissance_w = _first_match(text, PUISSANCE_W_RE)
+        irc_match = IRC_RE.search(text)
+        irc_value = irc_match.group(1) if irc_match else ""
+        return [_build_one_row(
+            num_devis=num_devis, num_client=num_client, nom_client=nom_client,
+            siret=siret, adresse_client=adresse_client_val, cp=cp, ville=ville,
+            tel=tel, mail=mail, represente_par=represente_par,
+            nom_beneficiaire=nom_beneficiaire, prenom_beneficiaire=prenom_beneficiaire,
+            secteur=secteur, adresse_travaux=adresse_travaux, cp_travaux=cp_travaux, ville_travaux=ville_travaux,
+            date_rai=date_rai, code_fiche=code_fiche, prime_cee=prime_cee_glob, total_ht=total_ht, total_ttc=total_ttc,
+            kwh_cumac=kwh_cumac_glob, raison_pro=raison_pro, siren_pro=siren_pro,
+            quantite_u=quantite_u, quantite_u_detail=quantite_u_detail, puissance_w=puissance_w, irc_value=irc_value,
+        )]
+
+    # Cas 2 : pas d'en-tête → chercher plusieurs blocs adresse dans le tableau
+    blocks = _find_multiple_address_blocks(text)
+    if len(blocks) >= 2:
+        result = []
+        for blk in blocks:
+            segment = text[blk["start"]:blk["end"]]
+            segment_flat = re.sub(r"\s+", " ", segment)
+            quantite_u, quantite_u_detail = _sum_quantite_u(segment_flat, NOMBRE_U_RE, NOMBRE_U_COMPACT_RE)
+            prime_cee_blk = _first_match(segment, PRIME_CEE_RE) or prime_cee_glob
+            kwh_cumac_blk = _first_match(segment, KWH_CUMAC_RE) or kwh_cumac_glob
+            puissance_w = _first_match(segment, PUISSANCE_W_RE) or _first_match(text, PUISSANCE_W_RE)
+            irc_match = IRC_RE.search(segment) or IRC_RE.search(text)
+            irc_value = irc_match.group(1) if irc_match else ""
+            result.append(_build_one_row(
+                num_devis=num_devis, num_client=num_client, nom_client=nom_client,
+                siret=siret, adresse_client=adresse_client_val, cp=cp, ville=ville,
+                tel=tel, mail=mail, represente_par=represente_par,
+                nom_beneficiaire=nom_beneficiaire, prenom_beneficiaire=prenom_beneficiaire,
+                secteur=secteur, adresse_travaux=blk["adresse"], cp_travaux=blk["code_postal"], ville_travaux=blk["ville"],
+                date_rai=date_rai, code_fiche=code_fiche, prime_cee=prime_cee_blk, total_ht=total_ht, total_ttc=total_ttc,
+                kwh_cumac=kwh_cumac_blk, raison_pro=raison_pro, siren_pro=siren_pro,
+                quantite_u=quantite_u, quantite_u_detail=quantite_u_detail, puissance_w=puissance_w, irc_value=irc_value,
+            ))
+        return result
+
+    # Cas 3 : un seul bloc ou aucun
+    if len(blocks) == 1:
+        blk = blocks[0]
+        segment = text[blk["start"]:blk["end"]]
+        segment_flat = re.sub(r"\s+", " ", segment)
+        quantite_u, quantite_u_detail = _sum_quantite_u(segment_flat, NOMBRE_U_RE, NOMBRE_U_COMPACT_RE)
+        prime_cee_blk = _first_match(segment, PRIME_CEE_RE) or prime_cee_glob
+        kwh_cumac_blk = _first_match(segment, KWH_CUMAC_RE) or kwh_cumac_glob
+        adresse_travaux = blk["adresse"]
+        cp_travaux, ville_travaux = blk["code_postal"], blk["ville"]
+    else:
+        adresse_travaux = ""
+        cp_travaux, ville_travaux = "", ""
+        text_flat = re.sub(r"\s+", " ", text)
+        quantite_u, quantite_u_detail = _sum_quantite_u(text_flat, NOMBRE_U_RE, NOMBRE_U_COMPACT_RE)
+        prime_cee_blk = prime_cee_glob
+        kwh_cumac_blk = kwh_cumac_glob
     puissance_w = _first_match(text, PUISSANCE_W_RE)
-    # IRC (pour répartir colonnes 39/40 si besoin)
     irc_match = IRC_RE.search(text)
     irc_value = irc_match.group(1) if irc_match else ""
-
-    return {
-        "num_devis": num_devis,
-        "num_client": num_client,
-        "nom_client": nom_client,
-        "siret": siret,
-        "adresse_client": adresse_client or f"{cp} {ville}".strip(),
-        "code_postal": cp,
-        "ville": ville,
-        "tel": tel,
-        "mail": mail,
-        "represente_par": represente_par,
-        "nom_beneficiaire": nom_beneficiaire,
-        "prenom_beneficiaire": prenom_beneficiaire,
-        "secteur_activite": secteur,
-        "adresse_des_travaux": adresse_travaux,
-        "code_postal_travaux": cp_travaux,
-        "ville_travaux": ville_travaux,
-        "date_rai": date_rai,
-        "code_fiche": code_fiche,
-        "prime_cee": prime_cee,
-        "total_ht": total_ht,
-        "total_ttc": total_ttc,
-        "kwh_cumac": kwh_cumac,
-        "raison_sociale_professionnel": raison_pro,
-        "siren_professionnel": siren_pro,
-        "nombre_luminaires": quantite_u,
-        "nombre_luminaires_detail": quantite_u_detail,
-        "puissance_totale_led_w": puissance_w,
-        "irc": irc_value,
-        "nom_site_beneficiaire": nom_client or adresse_travaux,
-    }
+    return [_build_one_row(
+        num_devis=num_devis, num_client=num_client, nom_client=nom_client,
+        siret=siret, adresse_client=adresse_client_val, cp=cp, ville=ville,
+        tel=tel, mail=mail, represente_par=represente_par,
+        nom_beneficiaire=nom_beneficiaire, prenom_beneficiaire=prenom_beneficiaire,
+        secteur=secteur, adresse_travaux=adresse_travaux, cp_travaux=cp_travaux, ville_travaux=ville_travaux,
+        date_rai=date_rai, code_fiche=code_fiche, prime_cee=prime_cee_blk, total_ht=total_ht, total_ttc=total_ttc,
+        kwh_cumac=kwh_cumac_blk, raison_pro=raison_pro, siren_pro=siren_pro,
+        quantite_u=quantite_u, quantite_u_detail=quantite_u_detail, puissance_w=puissance_w, irc_value=irc_value,
+    )]
